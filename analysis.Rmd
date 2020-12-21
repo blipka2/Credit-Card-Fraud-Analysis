@@ -1,0 +1,259 @@
+---
+title: "An Analysis of Credit Card Fraud Data"
+author: "Ben Lipka (blipka2@illinois.edu)"
+date: "Due 11/18/2020"
+output:
+  html_document: 
+    theme: default
+    toc: yes
+---
+
+```{r, setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, fig.align = 'center')
+```
+
+```{r, load-packages, include = FALSE}
+# load packages
+library(rpart)
+library(MLmetrics)
+library(pROC)
+library(randomForest)
+```
+
+```{r make-data, warning = FALSE, message = FALSE}
+# read data and subset
+source("make-data.R")
+```
+
+```{r read-full-data, warning = FALSE, message = FALSE}
+# read full data
+cc = data.table::fread("data/cc.csv.gz")
+```
+
+```{r read-subset-data, warning = FALSE, message = FALSE}
+# read subset of data
+cc_sub = data.table::fread("data/cc-sub.csv")
+```
+
+***
+
+## Abstract
+
+Credit cards, although extremely convenient, are very prone to fraud; detecting that fraud systematically would be an extremely powerful asset to banks. This analysis uses subsetted European cardholder data with ~0.15% fraudulent transactions to create decision tree and random forest models that predict the probability of a transaction being fraudulent. Both models appeared to behave extremely similarly, but the random forests intuitive variability in predicted probability outputs makes it the preferred model. This highly accurate model can be very useful as a guiding framework of what to do when a suspected case of fraud arises.
+
+***
+
+## Introduction
+
+The advent of credit cards provide an extremely convenient and safe way to exchange currency across the globe. However, the widespread use of credit cards comes with obvious security risks that cash transactions do not have: primarily, fraudulent transactions that the owner of the credit card did not make. Yet, the anonymous nature of a credit card transaction makes it difficult to identify fraudulent claims. In this analysis, we will attempt to observe trends in cases of credit card fraud to systematically identify new cases that are likely to be fraudulent. 
+
+***
+
+## Methods
+
+### Data
+
+This analysis will focus on data on transactions made by credit cards in September 2013 by European cardholders. In this very unbalanced dataset, there are 492 cases of fraud and 284,807 transactions in total, with a positive class rate of 0.172%. 
+
+Due to confidentiality, the variables in this dataset are anonymous aside from Time (the time in seconds between transactions), Amount (the purchase amount), and Class (whether the transaction was fraudulent or not). For this reason, it is impossible to provide a higher level explanation of the variables in this dataset. 
+
+Although the original dataset has 284,807 total transactions, for the purpose of this analysis we will be using a sample of this data containing 10,000 observations. In our sample, 9985 are genuine transactions and 15 are fraudulent. This positivity rate, 0.15%, is in a similar range to the datasets total 0.172% rate. 
+
+```{r}
+table(cc_sub$Class)
+```
+
+One small adjustment has been made to our dataset for clarity. The Class variable which details whether or not the transaction was fraudulent has been factorized and relabled as "fraud" or "genuine". 
+
+Finally, there do not seem to be any data validation issues present. As seen below, there are not any missing values, and since we do not know what a "proper" value for these variables are, we cannot determine if data is invalid. 
+
+```{r, echo=TRUE}
+table(is.na(cc))
+```
+
+### Modeling
+
+TO begin modeling, the credit card fraud dataset was split into 80% training and 20% testing sets for future validation. The training dataset was further split into 80% estimation and 20% validation datasets for model selection. 
+
+```{r, echo=TRUE}
+trn_idx <- sample(nrow(cc_sub), size=0.8 * nrow(cc_sub))
+cc_trn <- cc_sub[trn_idx, ]
+cc_tst <- cc_sub[-trn_idx, ]
+
+est_idx <- sample(nrow(cc_trn), size=0.8 * nrow(cc_trn))
+cc_est <- cc_trn[est_idx, ]
+cc_val <- cc_trn[-est_idx, ]
+```
+
+With these datasets split and created, it is time to begin fitting and evaluating models. When it boils down to it, this is a problem of binary classification. That is, a credit card transaction is either genuine or fraudulent. Because of this, the first model fitted will be a decision tree using the rpart library. 
+
+```{r}
+cc_est$binary = factor(dplyr::case_when(
+  cc_est$Class == "fraud" ~ "0",
+  cc_est$Class == "genuine" ~ "1",
+))
+cc_val$binary = factor(dplyr::case_when(
+  cc_val$Class == "fraud" ~ "0",
+  cc_val$Class == "genuine" ~ "1",
+))
+```
+
+```{r, echo=TRUE}
+# tree model creation
+tree_mod <- rpart(binary ~ .-Class, data = cc_est)
+tree_preds <- predict(tree_mod, cc_val, type = "class")
+
+# confusion matrix
+tp <- sum(cc_val$binary == 0 & tree_preds == 0)
+fp <- sum(cc_val$binary == 1 & tree_preds == 0)
+fn <- sum(cc_val$binary == 0 & tree_preds == 1)
+tn <- sum(cc_val$binary == 1 & tree_preds == 1)
+c(tp=tp, fp=fp, fn=fn, tn=tn)
+```
+
+Quite impressively, our decision tree model using the estimation dataset was 100% accurate on the validation dataset. That is, there was a single case of fraud in our validation dataset, and that was the only case of fraud that our model detected. That is extremely promising, but since there is only one case of fraud in the validation set it is best to explore other models as well to see how they perform. 
+
+Additionally, it is suggested by the organizers of the dataset to evaluate using the PR AUC method. Below is the ROC curve for this model, with a 100% accuracy. 
+
+
+```{r}
+tree_prob <- as.data.frame(predict(tree_mod, cc_val, type = "prob"))
+tree_roc <- roc(cc_val$binary ~ tree_prob$`1`, plot=TRUE, print.auc=TRUE)
+```
+
+While looking at the predicted probabilities for the individual case of fraud and the genuine transactions, it is abundantly clear that fraud is likely easily detectable in this dataset. Here are the respective probabilities of fraud vs. genuine for the one case of fraud in the validation data.
+
+```{r}
+tree_prob$`0`[1365]
+tree_prob$`1`[1365]
+```
+
+And here is the probability for a random genuine transaction in the validation dataset.
+
+```{r}
+tree_prob$`0`[1200]
+tree_prob$`1`[1200]
+```
+
+Still, let's look at another model to ensure something is not wrong here. The next type of model we will be looking at is a random forest, as it is evident that decision trees perform very strongly with this data. 
+
+```{r, echo=TRUE}
+rf_mod <- randomForest(binary ~ .-Class, data = cc_est)
+
+rf_preds <- predict(rf_mod, cc_val)
+table(cc_val$binary, rf_preds)
+```
+
+Once again, our random forest model based on the estimation dataset has achieved a 100% accuracy rate on the validation dataset. Let's take a look at the ROC curve.
+
+```{r}
+rf_prob <- as.data.frame(predict(rf_mod, cc_val, type = "prob"))
+rf_roc <- roc(cc_val$binary ~ rf_prob$`1`, plot=TRUE, print.auc=TRUE)
+```
+
+We are still at 100% accuracy. Here are the same observations probability as seen in the prior model, with the fraud case first in the first two blocks and genuine case in the second two. 
+
+```{r}
+rf_prob$`0`[1365]
+rf_prob$`1`[1365]
+```
+
+```{r}
+rf_prob$`0`[1200]
+rf_prob$`1`[1200]
+```
+
+One interesting note to point out is that it seems that our decision tree is more *certain* or both of these values. However, since there is only one case of fraud here it is difficult to truly draw that conclusion. 
+
+As the decision tree and random forest both seem to be performing at a very high level, we will test both on the testing data. 
+
+***
+
+## Results
+
+### Decision Tree Results
+
+```{r}
+cc_trn$binary = factor(dplyr::case_when(
+  cc_trn$Class == "fraud" ~ "0",
+  cc_trn$Class == "genuine" ~ "1",
+))
+cc_tst$binary = factor(dplyr::case_when(
+  cc_tst$Class == "fraud" ~ "0",
+  cc_tst$Class == "genuine" ~ "1",
+))
+```
+
+```{r, echo=TRUE}
+# tree model creation
+tree_mod <- rpart(binary ~ .-Class, data = cc_trn)
+tree_preds <- predict(tree_mod, cc_tst, type = "class")
+
+# confusion matrix
+tp <- sum(cc_tst$binary == 0 & tree_preds == 0)
+fp <- sum(cc_tst$binary == 1 & tree_preds == 0)
+fn <- sum(cc_tst$binary == 0 & tree_preds == 1)
+tn <- sum(cc_tst$binary == 1 & tree_preds == 1)
+c(tp=tp, fp=fp, fn=fn, tn=tn)
+```
+
+```{r}
+tree_prob <- as.data.frame(predict(tree_mod, cc_tst, type = "prob"))
+tree_roc <- roc(cc_tst$binary ~ tree_prob$`1`, plot=TRUE, print.auc=TRUE)
+```
+
+Below is the probabilities of fraud, the mislabled genuine transactions, and the probabilities of a few genuine transactions respectively. 
+
+```{r}
+tree_prob[c(31,384),]
+tree_prob[c(377,944),]
+tree_prob[c(700,1100),]
+```
+
+### Random Forest Results
+
+```{r, echo=TRUE}
+rf_mod <- randomForest(binary ~ .-Class, data = cc_trn)
+
+rf_preds <- predict(rf_mod, cc_tst)
+table(cc_tst$binary, rf_preds)
+```
+
+```{r}
+rf_prob <- as.data.frame(predict(rf_mod, cc_tst, type = "prob"))
+rf_roc <- roc(cc_tst$binary ~ rf_prob$`1`, plot=TRUE, print.auc=TRUE)
+```
+
+Below is the probabilities of fraud, the mislabled genuine transactions, and the probabilities of a few genuine transactions respectively. 
+
+```{r}
+rf_prob[c(31,384),]
+rf_prob[c(377,944),]
+rf_prob[c(700,1100),]
+```
+
+***
+
+## Discussion
+
+As seen in the results section, both the decision tree and random forest models perform identically on the testing dataset. Both models predict the two cases of fraud correctly, and 1996 out of 1998 cases of genuine credit card use correctly. Aside from the random forest AUC performing 0.001 better, the difference between these two high performing models lies in the predicted probabilities. 
+
+For the decision tree, the probabilities always remain the same for the two respective decisions. That implies that there are only two paths in this decision tree instead of multiple ways to end up at fraud or genuine. On the other hand, the random forest model seems to take the individual transaction into account much more intuitively; for example, one of the false positives is very on the cusp of being correctly labeled as a genuine transaction at a probability of 0.58 compared to the decision tree's uniform 0.8333. 
+
+Because of this, the random forest is undoubtedly the better model to detect credit card fraud. Not only did it correctly label both occurrences of fraud, but it also provides a much better probability metric for someone to interpret. 
+
+The real life application of this random forest model is much greater than the decision tree. For example, if the probability is above .75, the transaction can be automatically flagged as fraudulent, but if the transaction is under .75, a representative from the bank could notify the account holder and confirm that the transaction was genuine. In the decision tree, this kind of flexability is not present, despite seemingly identical accuracy.
+
+This random forest model can serve as an extremely powerful tool to identify whether a transaction is fraudulent or genuine, and provide different options to screen the transaction based on the probability outcome. 
+
+***
+
+## Appendix
+
+### Credit card data variable overview
+
+- Time: the time in seconds between transactions
+- Amount: the dollar amount of the transaction
+- Class: the status of the transaction (fraud/genuine)
+- binary: a binary classification of Class
+- V1 through V28: anonymous variables that have undergone a PCA transformation
